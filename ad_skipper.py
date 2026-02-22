@@ -8,6 +8,12 @@ Strategy (in order):
 2. Scan hotspot regions for a "×" / "Skip" close button by colour heuristics
 3. OCR scan for ad-related text keywords
 4. Fallback: tap common close-button positions
+
+Key behaviour
+─────────────
+dismiss_ad() WAITS for the skip/close button to become visible (ads often
+delay the close button by 5 seconds) before tapping.  It polls the screen
+every second up to config.AD_SKIP_WAIT_SECONDS.
 """
 
 import logging
@@ -23,42 +29,42 @@ import vision
 
 log = logging.getLogger(__name__)
 
-# Known close-button colours in BGR
-# White × on dark background
+# ─── Colour ranges for typical ad close/skip buttons (BGR) ───────────────────
+
+# White "×" on dark circular background (most common)
 _WHITE_LOWER = np.array([180, 180, 180], dtype=np.uint8)
 _WHITE_UPPER = np.array([255, 255, 255], dtype=np.uint8)
 
 # Red / orange "×"
-_RED_LOWER = np.array([0,   0, 160], dtype=np.uint8)
+_RED_LOWER = np.array([0,   0, 150], dtype=np.uint8)
 _RED_UPPER = np.array([80, 80, 255], dtype=np.uint8)
 
-# Yellow "Skip" button (common in reward ads)
-_YELLOW_LOWER = np.array([0,  180, 180], dtype=np.uint8)
+# Yellow/gold "Skip" button (reward ads)
+_YELLOW_LOWER = np.array([0,  160, 160], dtype=np.uint8)
 _YELLOW_UPPER = np.array([80, 255, 255], dtype=np.uint8)
 
-# Scan grid: divide screen into regions that might contain close buttons
-_CLOSE_BUTTON_HOTSPOTS = [
-    # (x, y, w, h)
-    # Top-right (most common for interstitials)
-    (880,  40, 200, 200),
-    # Top-left
-    (0,    40, 200, 200),
-    # Top-centre
-    (390,  40, 300, 200),
-    # Bottom-right
-    (880, 2100, 200, 200),
-    # Bottom-centre ("Skip Ad" bar)
-    (270, 2050, 540, 200),
-    # Mid-right (some reward video SDKs)
-    (880,  900, 200, 200),
+_COLOR_RANGES = [
+    (_WHITE_LOWER,  _WHITE_UPPER),
+    (_RED_LOWER,    _RED_UPPER),
+    (_YELLOW_LOWER, _YELLOW_UPPER),
 ]
 
-# Fallback tap positions when no button is visually located
+# Scan grid: regions that might contain close buttons (x, y, w, h)
+_CLOSE_BUTTON_HOTSPOTS = [
+    (860,   30, 220, 220),   # top-right  (most common for interstitials)
+    (0,     30, 220, 220),   # top-left
+    (380,   30, 320, 180),   # top-centre
+    (270, 2050, 540, 200),   # bottom-centre "Skip Ad" bar
+    (840, 2050, 240, 200),   # bottom-right
+    (860,  860, 220, 220),   # mid-right   (some reward-video SDKs)
+]
+
+# Fallback tap positions used ONLY after max wait time expires
 _FALLBACK_TAPS = [
-    (960, 80),    # top-right corner
-    (120, 80),    # top-left corner
-    (540, 2150),  # bottom-centre "Skip"
-    (960, 2150),  # bottom-right
+    (1020,  80),   # top-right corner
+    (60,    80),   # top-left corner
+    (540,  2150),  # bottom-centre "Skip"
+    (960,  2150),  # bottom-right
 ]
 
 # Text that appears inside/near ad close buttons
@@ -97,18 +103,20 @@ class AdSkipper:
         Heuristic check: return True if the current frame looks like an ad.
         Combines template matching + colour analysis + OCR.
         """
-        # 1. Template match
+        # 1. Template match (exact — very fast)
         if config.TEMPLATES.get("ad_overlay"):
-            match = vision.match_template(frame, config.TEMPLATES["ad_overlay"], threshold=0.70)
+            match = vision.match_template(
+                frame, config.TEMPLATES["ad_overlay"], threshold=0.70
+            )
             if match:
-                log.info("Ad detected via template match (score=%.2f)", match[0])
+                log.info("Ad detected via template (score=%.2f)", match[0])
                 return True
 
         # 2. Colour heuristic: look for the tell-tale small "×" button region
         for region in _CLOSE_BUTTON_HOTSPOTS:
             pos = self._find_close_button_in_region(frame, region)
             if pos:
-                log.info("Ad detected via close-button colour in region %s", region)
+                log.info("Ad close button colour-detected in region %s", region)
                 return True
 
         # 3. OCR on top strip (many ad SDKs show "Advertisement" / "Ad" label)
@@ -121,41 +129,80 @@ class AdSkipper:
 
     def dismiss_ad(self, frame: np.ndarray) -> bool:
         """
-        Try to dismiss a visible ad.  Returns True if a dismiss tap was made.
+        Wait for the skip/close button to appear, then tap it.
+
+        Many interstitial and reward-video ads force users to watch for 5 s
+        before the close button is shown.  This method polls once per second
+        for up to config.AD_SKIP_WAIT_SECONDS before falling back to blind taps.
+
+        Returns True once a dismiss tap has been made.
         """
-        log.info("Attempting to dismiss ad…")
+        max_wait = config.AD_SKIP_WAIT_SECONDS
+        log.info("Ad detected — waiting up to %ds for skip/close button…", max_wait)
 
-        # 1. Look for close button by colour in each hotspot
-        for region in _CLOSE_BUTTON_HOTSPOTS:
-            pos = self._find_close_button_in_region(frame, region)
-            if pos:
-                log.info("Tapping close button at (%d, %d)", *pos)
-                self.adb.tap(*pos, delay=0.8)
-                self._skips += 1
-                return True
+        for attempt in range(max_wait):
+            # Re-capture the screen on every iteration after the first
+            if attempt > 0:
+                try:
+                    frame = self.adb.screenshot()
+                except Exception as exc:
+                    log.warning("Screenshot failed during ad wait: %s", exc)
+                    time.sleep(1.0)
+                    continue
 
-        # 2. OCR-guided tap
-        for region in _CLOSE_BUTTON_HOTSPOTS:
-            if vision.find_text_in_region(frame, _SKIP_KEYWORDS, region):
-                cx = region[0] + region[2] // 2
-                cy = region[1] + region[3] // 2
-                log.info("Tapping OCR skip keyword region centre (%d, %d)", cx, cy)
-                self.adb.tap(cx, cy, delay=0.8)
-                self._skips += 1
-                return True
+            # ── 1. Colour-based close button search ──────────────────────────
+            for region in _CLOSE_BUTTON_HOTSPOTS:
+                pos = self._find_close_button_in_region(frame, region)
+                if pos:
+                    log.info(
+                        "Skip/close button at (%d, %d) — tapping (attempt %d)",
+                        pos[0], pos[1], attempt + 1,
+                    )
+                    self.adb.tap(*pos, delay=0.8)
+                    self._skips += 1
+                    time.sleep(0.5)   # brief pause for ad-dismiss animation
+                    return True
 
-        # 3. Template-matched close button (ad_overlay template)
-        if config.TEMPLATES.get("ad_overlay"):
-            match = vision.match_template(frame, config.TEMPLATES["ad_overlay"], threshold=0.65)
-            if match:
-                _, (cx, cy) = match
-                log.info("Tapping template-matched overlay at (%d, %d)", cx, cy)
-                self.adb.tap(cx, cy, delay=0.8)
-                self._skips += 1
-                return True
+            # ── 2. OCR-guided close button search ────────────────────────────
+            for region in _CLOSE_BUTTON_HOTSPOTS:
+                if vision.find_text_in_region(frame, _SKIP_KEYWORDS, region):
+                    cx = region[0] + region[2] // 2
+                    cy = region[1] + region[3] // 2
+                    log.info(
+                        "OCR skip keyword in region %s — tapping (%d, %d) (attempt %d)",
+                        region, cx, cy, attempt + 1,
+                    )
+                    self.adb.tap(cx, cy, delay=0.8)
+                    self._skips += 1
+                    time.sleep(0.5)
+                    return True
 
-        # 4. Fallback: try all known close-button positions
-        log.warning("No close button found; trying fallback tap sequence")
+            # ── 3. Template-matched close button ─────────────────────────────
+            if config.TEMPLATES.get("ad_overlay"):
+                match = vision.match_template(
+                    frame, config.TEMPLATES["ad_overlay"], threshold=0.65
+                )
+                if match:
+                    _, (cx, cy) = match
+                    log.info(
+                        "Template-matched close button at (%d, %d) (attempt %d)",
+                        cx, cy, attempt + 1,
+                    )
+                    self.adb.tap(cx, cy, delay=0.8)
+                    self._skips += 1
+                    time.sleep(0.5)
+                    return True
+
+            log.debug(
+                "Close button not visible yet (attempt %d/%d) — waiting 1 s…",
+                attempt + 1, max_wait,
+            )
+            time.sleep(1.0)
+
+        # ── 4. Fallback after timeout ─────────────────────────────────────────
+        log.warning(
+            "Skip button did not appear within %d s — trying fallback taps", max_wait
+        )
         for tx, ty in _FALLBACK_TAPS:
             self.adb.tap(tx, ty, delay=0.5)
         self._skips += 1
@@ -167,40 +214,8 @@ class AdSkipper:
         """
         if self.is_ad_showing(frame):
             self.dismiss_ad(frame)
-            # Wait for ad animation to finish, then take a fresh check
-            time.sleep(1.5)
-            return True
-        return False
-
-    def skip_reward_video(self, max_wait: int = 35) -> bool:
-        """
-        Wait for a reward-video ad to finish or become skippable, then dismiss.
-        Polls every second for a skip button up to max_wait seconds.
-        Returns True if skipped successfully.
-        """
-        log.info("Waiting for reward video skip button (max %ds)…", max_wait)
-        for _ in range(max_wait):
-            frame = self.adb.screenshot()
-            for region in _CLOSE_BUTTON_HOTSPOTS:
-                pos = self._find_close_button_in_region(frame, region)
-                if pos:
-                    log.info("Skip button appeared at (%d, %d)", *pos)
-                    self.adb.tap(*pos, delay=1.0)
-                    self._skips += 1
-                    return True
-                if vision.find_text_in_region(frame, _SKIP_KEYWORDS, region):
-                    cx = region[0] + region[2] // 2
-                    cy = region[1] + region[3] // 2
-                    self.adb.tap(cx, cy, delay=1.0)
-                    self._skips += 1
-                    return True
             time.sleep(1.0)
-
-        # Force-tap after timeout
-        log.warning("Reward video did not become skippable; force-tapping")
-        for tx, ty in _FALLBACK_TAPS:
-            self.adb.tap(tx, ty, delay=0.4)
-        self._skips += 1
+            return True
         return False
 
     @property
@@ -215,21 +230,21 @@ class AdSkipper:
         """
         Search a hotspot region for a close-button-shaped blob.
         Returns (x, y) in full-frame coordinates, or None.
+
+        A close button is expected to be a small compact blob (8–3 000 px)
+        in white, red, or yellow — far smaller than a full background fill.
         """
         x, y, w, h = region
         if y + h > frame.shape[0] or x + w > frame.shape[1]:
             return None
-        patch = frame[y:y + h, x:x + w]
+        patch = frame[y : y + h, x : x + w]
 
-        for lower, upper in [
-            (_WHITE_LOWER, _WHITE_UPPER),
-            (_RED_LOWER,   _RED_UPPER),
-            (_YELLOW_LOWER, _YELLOW_UPPER),
-        ]:
-            mask = cv2.inRange(patch, lower, upper)
+        for lower, upper in _COLOR_RANGES:
+            mask  = cv2.inRange(patch, lower, upper)
             count = int(mask.sum() // 255)
-            if 8 <= count <= 3000:  # small button, not full background
-                # Find centroid
+
+            # Blob must be small (button) but non-trivial
+            if 8 <= count <= 3000:
                 M = cv2.moments(mask)
                 if M["m00"] > 0:
                     cx = int(M["m10"] / M["m00"]) + x
