@@ -1,0 +1,14 @@
+# Android Game Automation Bot — Python dependencies
+# Install with:  pip install -r requirements.txt
+
+# Image processing & computer vision (required)
+opencv-python>=4.8.0
+numpy>=1.24.0
+Pillow>=10.0.0
+
+# OCR support (optional but recommended for text-based ad detection)
+# Requires Tesseract OCR binary: https://github.com/tesseract-ocr/tesseract
+pytesseract>=0.3.10
+
+# Faster image comparison / hashing (optional)
+imagehash>=4.3.1
