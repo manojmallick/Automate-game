@@ -1,5 +1,7 @@
 # Android Game Automation Bot
 
+> Out of the box the tap coordinates and states are tuned for a **knife-throw** game (tap to throw a knife at a rotating target) on a 1080×2316 screen. Other games work after calibration and a custom `_play_turn()` (see below).
+
 Fully automates Android game-play via ADB (Android Debug Bridge) with:
 - **Automatic ad skipping** — detects and dismisses interstitial, banner, and reward-video ads
 - **Game-state machine** — classifies every screen and takes the right action
@@ -92,7 +94,7 @@ Press **Ctrl+C** to stop gracefully.
 ## File Structure
 
 ```
-Automate-game/
+automate-game/
 ├── main.py          ← Bot runner (entry point)
 ├── config.py        ← All settings: tap coords, thresholds, paths
 ├── adb_controller.py← ADB wrapper (tap, swipe, screenshot, …)
@@ -104,6 +106,59 @@ Automate-game/
 ├── templates/       ← Game-state template PNG images (you capture these)
 └── debug_screenshots/← Auto-saved debug frames (when enabled in config)
 ```
+
+---
+
+## How It Works
+
+Each loop (every `SCREENSHOT_INTERVAL` seconds, default 1.0) the bot:
+
+1. Takes a screenshot over ADB.
+2. Checks for an ad first (highest priority) and dismisses it if present.
+3. Classifies the screen: template match first, OCR/colour heuristics as a fallback.
+4. Runs the handler for that state.
+5. If the same state repeats for `MAX_STUCK_LOOPS` loops, runs a recovery action.
+
+### Game states
+
+| State | Meaning | Action |
+|---|---|---|
+| `AD` | Ad overlay on screen | Run the ad-skipping routine |
+| `LOADING` | Splash or loading screen | Wait 1.5 s |
+| `MAIN_MENU` | Main menu | Tap `play_button` |
+| `DAILY_REWARD` | Daily reward popup | Tap `collect_reward`, then `continue_after_win` |
+| `LEVEL_SELECT` | Level picker | Tap `play_button` |
+| `IN_GAME` | Playing | Throw a knife (`throw_knife` tap) |
+| `LEVEL_COMPLETE` | Level cleared | Tap `next_level` / `continue_after_win` |
+| `LEVEL_FAILED` | Failed level (fallback) | Tap `no_thanks` if OCR sees it, otherwise `restart` |
+| `CONTINUE_PROMPT` | "CONTINUE?" countdown | Tap `no_thanks` |
+| `GAME_OVER` | Post-death screen | Tap `restart` |
+| `PAUSED` | Pause overlay | Press Back |
+| `UNKNOWN` | Unrecognised screen | Tap the screen centre |
+
+### Command-line options (`main.py`)
+
+| Option | Description |
+|---|---|
+| `--device SERIAL` | ADB device serial (default: auto-detect) |
+| `--ip ADDRESS` / `--port N` | Connect over Wi-Fi (default port 5555) |
+| `--package NAME` | Launch the game by package name |
+| `--max-loops N` | Stop after N loops (0 = run until Ctrl+C) |
+| `--interval SECONDS` | Override the loop interval |
+| `--preview` | Show a live preview window |
+| `--verbose` | Debug logging |
+| `--log-file PATH` | Also write logs to a file |
+
+### Key settings (`config.py`)
+
+| Setting | Default | Purpose |
+|---|---|---|
+| `SCREEN_WIDTH`, `SCREEN_HEIGHT` | 1080, 2316 | Device resolution; all coordinates assume this |
+| `MATCH_THRESHOLD` | 0.80 | Template-match strictness (lower = more permissive) |
+| `AD_SKIP_WAIT_SECONDS` | 35 | Longest wait for a skip button on reward videos |
+| `MAX_STUCK_LOOPS` | 20 | Loops in one state before recovery |
+| `TAP_DELAY` | 0.3 | Pause after each tap, in seconds |
+| `SAVE_DEBUG_SCREENSHOTS` | True | Save frames to `debug_screenshots/` |
 
 ---
 
