@@ -124,16 +124,17 @@ Each loop (every `SCREENSHOT_INTERVAL` seconds, default 1.0) the bot:
 | State | Meaning | Action |
 |---|---|---|
 | `AD` | Ad overlay on screen | Run the ad-skipping routine |
-| `LOADING` | Splash or loading screen | Wait |
+| `LOADING` | Splash or loading screen | Wait 1.5 s |
 | `MAIN_MENU` | Main menu | Tap `play_button` |
-| `DAILY_REWARD` | Daily reward popup | Tap `collect_reward` |
-| `LEVEL_SELECT` | Level picker | Choose the next level |
+| `DAILY_REWARD` | Daily reward popup | Tap `collect_reward`, then `continue_after_win` |
+| `LEVEL_SELECT` | Level picker | Tap `play_button` |
 | `IN_GAME` | Playing | Throw a knife (`throw_knife` tap) |
 | `LEVEL_COMPLETE` | Level cleared | Tap `next_level` / `continue_after_win` |
-| `LEVEL_FAILED` | Failed level | Try "NO, THANKS", otherwise restart |
+| `LEVEL_FAILED` | Failed level (fallback) | Tap `no_thanks` if OCR sees it, otherwise `restart` |
 | `CONTINUE_PROMPT` | "CONTINUE?" countdown | Tap `no_thanks` |
 | `GAME_OVER` | Post-death screen | Tap `restart` |
-| `PAUSED` / `UNKNOWN` | Pause overlay or unrecognised screen | Resume or recover |
+| `PAUSED` | Pause overlay | Press Back |
+| `UNKNOWN` | Unrecognised screen | Tap the screen centre |
 
 ### Command-line options (`main.py`)
 
